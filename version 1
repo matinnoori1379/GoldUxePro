@@ -1,0 +1,353 @@
+//+------------------------------------------------------------------+
+//|                                                   GOLDxuePro.mq4 |
+//|                                  Copyright 2024, MetaQuotes Ltd. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2024, MetaQuotes Ltd."
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+#property strict
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| //نوع ریسک منیجمنت                                                                 |
+//+------------------------------------------------------------------+
+
+ enum RiskType
+   {
+    Risk_Base,
+    Volume_Base
+   };
+   
+//+------------------------------------------------------------------+
+//| // تنظیمات ورودی                                                                 |
+//+------------------------------------------------------------------+
+input int StopLoss = 500;       // StopLoss
+input int tackProfit = 500;     // TackeProfir
+input int Slippage = 3;        // Slippage
+input RiskType LotSizing =0; //LotSizing
+input double StartRiskPercent = 1.0; //StartRisk
+input double R_RecoveryFactor = 2.0 ; // RiskRecoveryFactor
+input double MaxRiskMultiplier = 4.0; // MaxRisk
+input double StartLots = 0.01;       //StartVolume
+input double V_RecoveryFactor = 2.0 ; //VolumeRecoveryFactor
+input double MaxVolumeMultiplier = 0.04; //MaxVolume
+input datetime StartDate_H = D'2020.01.01 00:00'; // Start search history
+input datetime EndDate_H = D'2030.01.01 00:00' ;   // End search history
+input string CloseAll = "16:25"; // Close all open orders to..
+input string ClosePending= "16:25"; // Close all pending orders to..
+//+------------------------------------------------------------------+
+//| // متغیرهای سراسری                                                                 |
+//+------------------------------------------------------------------+
+
+double buyStopPrice, sellStopPrice;
+int buyStopTicket = -1, sellStopTicket = -1; 
+datetime lastOrderTime = 0; // زمان سفارش قبلی
+double lastAccountBalance = 0.0 ;  // حجم قبلی سرمایه
+double riskMultiplier = 1.0;          // ضریب فعلی ریسک
+double volumeMultiplier = 1.0;          // ضریب فعلی حجم
+bool History_flag = false ;
+int CloseAll_H,CloseAll_M,ClosePending_H,ClosePending_M ; // متغییر های ذخیره ساعت و دقیقه
+
+//...............
+int OnInit()
+  {
+  ParseTime();
+  HistoryResearch();
+
+//--- create timer
+   EventSetTimer(60);
+   
+//---
+   return(INIT_SUCCEEDED);
+  }
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+//--- destroy timer
+   EventKillTimer();
+   
+  }
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   CheckAndPlacePendingOrders();
+   ManageOrders();
+  }
+//+------------------------------------------------------------------+
+//| Timer function                                                   |
+//+------------------------------------------------------------------+
+void OnTimer()
+  {
+//---
+   
+  }
+//+------------------------------------------------------------------+
+//| ChartEvent function                                              |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id,
+                  const long &lparam,
+                  const double &dparam,
+                  const string &sparam)
+  {
+//---
+   
+  }
+//+------------------------------------------------------------------+
+
+// تابع استخراج اعداد از ساعت های ورودی
+void ParseTime()
+{
+   Comment("heghg");
+   string CloseAll_Array[];
+   int count1 = StringSplit(CloseAll, ':', CloseAll_Array);
+      
+   if (count1 != 2){
+    Alert("Error: Invalid time format. Expected 'HH:MM'.");
+    return;
+    }
+    
+   CloseAll_H =(int)StringToInteger(CloseAll_Array[0]);
+   CloseAll_M =(int)StringToInteger(CloseAll_Array[1]);
+   
+   string ClosePending_Array[];
+   int count2 = StringSplit(ClosePending, ':', ClosePending_Array);
+   
+   if (count2 != 2){
+    Alert("Error: Invalid time format. Expected 'HH:MM'.");
+    return;
+    }
+   
+    ClosePending_H =(int)StringToInteger(ClosePending_Array[0]);
+    ClosePending_M =(int)StringToInteger(ClosePending_Array[1]);
+      
+}
+
+// تابع تبدیل پیپ به قیمت
+double PipsToPrice(int pips) 
+{
+   return pips * Point;
+}
+
+// تابع بررسی و تنظیم دستورات پندینگ
+void CheckAndPlacePendingOrders() {
+   // بررسی زمان شروع کندل 16:00
+   if (TimeHour(TimeCurrent()) == 16 && TimeMinute(TimeCurrent()) == 00 && lastOrderTime != Time[0]) {
+      // دریافت های و لو کندل قبلی (15:30)
+      double highPrice = iHigh(Symbol(),0, 1);
+      double lowPrice = iLow(Symbol(),0, 1);
+      
+      DrawZone(highPrice,lowPrice);
+      
+      // محاسبه قیمت‌های بای‌استاپ و سل‌استاپ
+      buyStopPrice = highPrice;
+      sellStopPrice = lowPrice;
+
+      // محاسبه استاپ لاس
+      double buyStopLoss = buyStopPrice - PipsToPrice(StopLoss);
+      double sellStopLoss = sellStopPrice + PipsToPrice(StopLoss);
+      double buyTackProfit = buyStopPrice + PipsToPrice(tackProfit);
+      double sellTackProfit = sellStopPrice - PipsToPrice(tackProfit);
+
+      // تنظیم دستورات پندینگ
+       buyStopTicket = OrderSend(Symbol(), OP_BUYSTOP,LotSizing == 0 ? RiskBaseLot() : VolumekBaseLot(), buyStopPrice, Slippage, buyStopLoss, buyTackProfit, "Buy Stop", 0, 0, Green);
+       sellStopTicket = OrderSend(Symbol(), OP_SELLSTOP, LotSizing == 0 ? RiskBaseLot() : VolumekBaseLot(), sellStopPrice, Slippage, sellStopLoss, sellTackProfit, "Sell Stop", 0, 0, Red); 
+
+      // ذخیره زمان آخرین دستورات
+      lastOrderTime = Time[0];
+   }
+}
+
+
+// تابع حذف تمامی دستورات پندینگ
+bool DeletePendingOrders() {
+
+   bool isDeleted=false;
+   for (int i = OrdersTotal() - 1; i >= 0; i--) {
+      if (OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) {
+         if (OrderType() == OP_BUYSTOP || OrderType() == OP_SELLSTOP) {
+            isDeleted = OrderDelete(OrderTicket());
+         }
+      }
+   }
+   return isDeleted;
+}
+
+
+// تابع حذف تمامی معاملات باز
+void CloseOpenTrades()
+{
+   int totalOrders = OrdersTotal();
+
+   for (int i = totalOrders - 1; i >= 0; i--)
+   {
+      if (OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+      {
+         // فقط معاملات باز (نه سفارشات معلق) را انتخاب می‌کنیم
+         if (OrderType() == OP_BUY || OrderType() == OP_SELL)
+         {
+            int ticket = OrderTicket(); // شماره تیکت معامله
+
+            // بستن معامله
+            bool result = false;
+            if (OrderType() == OP_BUY)
+               result = OrderClose(ticket, OrderLots(), Bid, 3, clrRed);
+            else if (OrderType() == OP_SELL)
+               result = OrderClose(ticket, OrderLots(), Ask, 3, clrRed); 
+         }
+      }
+   }
+}
+
+
+//مدیریت معامله
+void ManageOrders() {
+
+   bool isDeleted=false;
+   
+   for (int i = OrdersTotal() - 1; i >= 0; i--) {
+      if (OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) {
+         // اگر یکی از دستورات فعال شد، دستور دیگر حذف شود
+         if (OrderType() == OP_BUY && OrderOpenPrice() == buyStopPrice) {
+            if (sellStopTicket > 0) {
+               isDeleted =OrderDelete(sellStopTicket);
+               sellStopTicket = -1;
+            }
+         }
+         if (OrderType() == OP_SELL && OrderOpenPrice() == sellStopPrice) {
+            if (buyStopTicket > 0) {
+               isDeleted =OrderDelete(buyStopTicket);
+               buyStopTicket = -1;
+            }
+         }
+      }
+   }
+   
+   // اگر تا 16:25 هیچکدام فعال نشدند، هر دو دستور حذف شوند
+   if (TimeHour(TimeCurrent()) == ClosePending_H && TimeMinute(TimeCurrent()) == ClosePending_M) 
+   {
+      if(DeletePendingOrders())
+        {
+           buyStopTicket = -1;
+           sellStopTicket = -1;
+        }
+   }
+   
+   //بستن تمامی دستورات خرید و فروش بعداز ساعت تایین شده
+   if(TimeHour(TimeCurrent()) == CloseAll_H && TimeMinute(TimeCurrent()) == CloseAll_M)
+     {   
+        CloseOpenTrades();
+        buyStopTicket = -1;
+        sellStopTicket = -1;
+     }  
+}
+
+//تابع محاسبه حجم معامله بر اساس درصد ریسک
+double RiskBaseLot(){
+   double currentBalance = AccountBalance();
+   
+       if (currentBalance < lastAccountBalance) // اگر حساب کاهش یابد (ضرر)
+          {
+            riskMultiplier = riskMultiplier > MaxRiskMultiplier ? MaxRiskMultiplier : riskMultiplier  * R_RecoveryFactor ; 
+              
+          }else if (currentBalance > lastAccountBalance) // اگر حساب افزایش یابد (سود)
+          {
+            if(History_flag)
+              {
+                  History_flag=false;
+              }else
+              {
+                  riskMultiplier = 1 ; // بازنشانی ضریب ریسک به مقدار اولیه
+              }
+          }
+   lastAccountBalance = currentBalance; // به‌روزرسانی موجودی قبلی
+            
+   double riskAmount = (currentBalance *StartRiskPercent / 100)*riskMultiplier ; // مقدار ریسک
+   double lotSize;
+   if(riskAmount>5)
+     {
+      lotSize =NormalizeDouble(riskAmount/StopLoss, 2);   // حجم لات را تا 2 رقم اعشار گرد می‌کند
+     }else
+     {
+      lotSize = StartLots ;   
+     }
+     return lotSize;
+}
+
+//تابع افزاینده پله ای حجم
+double VolumekBaseLot()
+{
+
+   double currentBalance = AccountBalance();
+   double NewVolume;
+   if(currentBalance < lastAccountBalance) // اگر حساب کاهش یابد (ضرر)
+     {
+       volumeMultiplier = volumeMultiplier * V_RecoveryFactor ;
+      
+       if( volumeMultiplier*StartLots > MaxVolumeMultiplier)
+         {
+           lastAccountBalance = currentBalance; 
+           return MaxVolumeMultiplier;
+         }
+      
+     }else if(currentBalance > lastAccountBalance) 
+     {
+       if(History_flag)
+         {
+           History_flag=false;
+         }else
+         {
+           volumeMultiplier = 1 ; // بازنشانی ضریب حجم به مقدار اولیه
+         } 
+     }
+     
+     lastAccountBalance = currentBalance;  
+     NewVolume = volumeMultiplier*StartLots;
+     return NewVolume ;
+}
+
+// تابع جستجوی هیستوری برای یافتن آخرین عملکرد
+
+void HistoryResearch()
+{
+
+    int totalOrders = OrdersHistoryTotal(); // تعداد کل معاملات تاریخچه
+    for (int i = totalOrders - 1; i >= 0; i--) // پیمایش تاریخچه از آخرین معامله
+    {
+        if (OrderSelect(i, SELECT_BY_POS, MODE_HISTORY)) // انتخاب معامله
+        {
+            datetime orderCloseTime = OrderCloseTime(); // زمان بسته شدن معامله
+            double profit = OrderProfit(); // سود یا ضرر معامله
+
+            // بررسی اینکه معامله بسته شده، سود یا زیان دارد، و در بازه زمانی مشخص است
+            if (orderCloseTime >= StartDate_H && orderCloseTime <= EndDate_H && profit > 0)
+            {
+               break;
+               
+            }else if(orderCloseTime >= StartDate_H && orderCloseTime <= EndDate_H && profit < 0)
+            {
+              riskMultiplier = riskMultiplier  * R_RecoveryFactor ;
+              volumeMultiplier = volumeMultiplier * V_RecoveryFactor ;
+              History_flag = true ;  
+            }
+        }
+    }
+}
+
+
+// تابع رسم ناحیه زرد رنگ
+void DrawZone(double Begin, double Finish )
+{
+    datetime startTime = Time[1];              // زمان شروع مستطیل (زمان فعلی)
+    datetime endTime = startTime + (10 * 3600);    // زمان پایان مستطیل (2 ساعت بعد)
+    
+    ObjectCreate(0, "SupportZone"+TimeToStr(Time[1]), OBJ_RECTANGLE, 0, startTime, Begin, endTime, Finish);
+    ObjectSetInteger(0,"SupportZone"+TimeToStr(Time[1]), OBJPROP_COLOR, clrMidnightBlue); 
+}
+
